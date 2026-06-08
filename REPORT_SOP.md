@@ -250,28 +250,39 @@ GROUP BY first_day ORDER BY first_day
 
 **风格**：DingTalk markdown 兼容；不超过 2,000 字；不要 AI 味。
 
-**推送方式**：
+**推送方式（带加签）**：
+
+钉钉机器人开启了"加签"安全模式 — 每次发送必须附带 `timestamp` + `sign`（用 SEC 密钥 HMAC-SHA256 计算）。
 
 ```bash
-curl -s 'https://oapi.dingtalk.com/robot/send?access_token=f5e75d77195619f2d7ff7bead6c800c82f866e9c73c4c32536b9c8b12e3f6d18' \
-  -H 'Content-Type: application/json' \
-  -d "$(cat <<'EOF'
+WEBHOOK='https://oapi.dingtalk.com/robot/send?access_token=467e46ac50ff929739fa23e889e03bbd57f51f85466298eba2816498c5042a31'
+SECRET='SECdc954e416fef3d7bfa45eee8ec17c612327b39a5a65711612633524262914c01'
+
+timestamp=$(($(date +%s) * 1000))
+sign=$(printf "%s\n%s" "$timestamp" "$SECRET" | openssl dgst -sha256 -hmac "$SECRET" -binary | base64)
+encoded_sign=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$sign")
+URL="${WEBHOOK}&timestamp=${timestamp}&sign=${encoded_sign}"
+
+# 把消息写到临时文件再用 curl -d @file，避开 shell 转义
+cat > /tmp/dingtalk_msg.json <<'EOF'
 {
   "msgtype": "markdown",
   "markdown": {
     "title": "Mira 数据周报 W{N}",
-    "text": "## Mira 数据周报 W{N}（YYYY-MM-DD ~ YYYY-MM-DD）\n\n**核心数字**\n- ...\n- ...\n\n**正面信号**\n- ✅ ...\n\n**警示信号**\n- 🚨 ...\n\n**下周必做**\n1. ...\n2. ...\n\n完整报告：https://github.com/selinayan-YYJ/mira-weekly-reports/blob/main/W{N}_data_report_{YYYYMMDD}.md"
+    "text": "## Mira 数据周报 W{N}（YYYY-MM-DD ~ YYYY-MM-DD）\n\n**核心数字**\n- ...\n\n**正面信号**\n- ✅ ...\n\n**警示信号**\n- 🚨 ...\n\n**下周必做**\n1. ...\n\n完整报告：https://github.com/selinayan-YYJ/mira-weekly-reports/blob/main/W{N}_data_report_{YYYYMMDD}.md"
   }
 }
 EOF
-)"
+
+curl -s "$URL" -H 'Content-Type: application/json' -d @/tmp/dingtalk_msg.json
 ```
 
 **校验**：
-- DingTalk 返回 `{"errcode":0,"errmsg":"ok"}` = 成功
-- 返回 `{"errcode":300001,...}` = token 错或撤销 → 在报告顶部加 ⚠️ 钉钉推送失败 备注，但仍 push 报告
+- 返回 `{"errcode":0,"errmsg":"ok"}` = 成功
+- 返回 `{"errcode":310000,"errmsg":"...签名不匹配..."}` = SEC 密钥错或签名算法不对
+- 返回其它错误 → 在报告顶部加 ⚠️ 钉钉推送失败 备注，但仍 push 报告
 
-**安全**：webhook token 是钉钉自定义机器人的密钥。如泄露在群里被滥用，在钉钉群机器人管理处撤销 + 重新生成，更新本文件 + routine prompt。
+**安全**：webhook URL + SEC 密钥都在本文件 + routine prompt 中。如泄露：钉钉群 → 智能群助手 → 机器人 → 撤销 / 改密钥 → 同步更新本文件 + routine。
 
 ## 7. 自检清单（每次报告产出前）
 
