@@ -233,8 +233,45 @@ GROUP BY first_day ORDER BY first_day
 
 报告写好后：
 1. 保存到 `~/mira-work/weekly-reports/data-reports/W{N}_data_report_{YYYYMMDD}.md`
-2. `git add` + commit + push 到 mira-work repo
-3. 不发钉钉群（Selina 自己看完后决定是否同步）
+2. `git add` + commit + push
+3. **推送钉钉群**（详见 §6.1）
+
+### 6.1 钉钉群同步（每周必做）
+
+每份周报产出后立即推送一份**简版**到钉钉群，全文交给点链接的人去 GitHub 看。
+
+**钉钉简版必含 5 段**（按顺序）：
+
+1. **标题** — `Mira 数据周报 W{N}（YYYY-MM-DD ~ YYYY-MM-DD）`
+2. **核心数字**（3-5 条 bullet）— WAU / 工作日 DAU 均 / 周 task / 北极星 / DAU/MAU 粘性
+3. **正面信号**（2-3 条 ✅）
+4. **警示信号**（1-3 条 🚨/⚠️）— 含 Layer 1/2 状态
+5. **下周必做**（2-4 条 P0/P1）
+
+**风格**：DingTalk markdown 兼容；不超过 2,000 字；不要 AI 味。
+
+**推送方式**：
+
+```bash
+curl -s 'https://oapi.dingtalk.com/robot/send?access_token=f5e75d77195619f2d7ff7bead6c800c82f866e9c73c4c32536b9c8b12e3f6d18' \
+  -H 'Content-Type: application/json' \
+  -d "$(cat <<'EOF'
+{
+  "msgtype": "markdown",
+  "markdown": {
+    "title": "Mira 数据周报 W{N}",
+    "text": "## Mira 数据周报 W{N}（YYYY-MM-DD ~ YYYY-MM-DD）\n\n**核心数字**\n- ...\n- ...\n\n**正面信号**\n- ✅ ...\n\n**警示信号**\n- 🚨 ...\n\n**下周必做**\n1. ...\n2. ...\n\n完整报告：https://github.com/selinayan-YYJ/mira-weekly-reports/blob/main/W{N}_data_report_{YYYYMMDD}.md"
+  }
+}
+EOF
+)"
+```
+
+**校验**：
+- DingTalk 返回 `{"errcode":0,"errmsg":"ok"}` = 成功
+- 返回 `{"errcode":300001,...}` = token 错或撤销 → 在报告顶部加 ⚠️ 钉钉推送失败 备注，但仍 push 报告
+
+**安全**：webhook token 是钉钉自定义机器人的密钥。如泄露在群里被滥用，在钉钉群机器人管理处撤销 + 重新生成，更新本文件 + routine prompt。
 
 ## 7. 自检清单（每次报告产出前）
 
