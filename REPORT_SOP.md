@@ -13,26 +13,51 @@
 ## 2. 数据口径（不可更改）
 
 - **项目**：PostHog project 332580
-- **内部用户排除**：cohort 223578（当前 39 人；运行时实时查 cohort 当前大小）
-- **🚨 离职科锐排除**（2026-06-09 起强制）：MDM 把全部 29,114 个科锐员工灌进库，含 26,704 离职 + 3 未入职。**必须排除 `org_name='科锐国际' AND org_employment_status != '在职'`**，否则全域数据被离职员工历史行为污染。
+- **三个核心 cohort**（2026-06-09 起，Selina 在 PostHog UI 维护，自动剔除离职污染）：
+  - **CI group**（在职科锐） — cohort id **317161**
+  - **non-CI group**（非科锐） — cohort id **351814**
+  - **Internal Users**（Mira + QA 测试，必须排除） — cohort id **223578**
 
-### 标准排除子句（**所有数据查询必加**）
+### 标准 WHERE 子句（**所有数据查询必加**）
 
 ```sql
-person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (
-  SELECT id FROM persons
-  WHERE properties.org_name = '科锐国际'
-    AND properties.org_employment_status != '在职'
+AND person_id IN (
+  SELECT person_id FROM static_cohort_people WHERE cohort_id IN (317161, 351814)
+  UNION DISTINCT
+  SELECT person_id FROM raw_cohort_people WHERE cohort_id IN (317161, 351814)
 )
+AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
 ```
 
-⚠️ **关于 person-on-events 模式的注意**：本项目开启了 PoE，事件表上 `person.properties.*` 是事件 ingestion 时刻的值，对 MDM 后期导入的 `org_name/org_employment_status` 全是 NULL。**必须从 persons 表查当前值再排除 person_id**，不能直接在 events 表 WHERE 里写 `person.properties.org_name='科锐国际'`。
+逻辑：**只看 CI ∪ non-CI 两个 cohort 的人**，再排除 Internal Users。离职科锐自动被排除（CI cohort 定义已加在职过滤）。
+
+### 拆分查询模板（科锐 vs 非科锐）
+
+```sql
+-- 仅 CI group（在职科锐）
+AND person_id IN (
+  SELECT person_id FROM static_cohort_people WHERE cohort_id = 317161
+  UNION DISTINCT
+  SELECT person_id FROM raw_cohort_people WHERE cohort_id = 317161
+)
+AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+
+-- 仅 non-CI group（非科锐）
+AND person_id IN (
+  SELECT person_id FROM static_cohort_people WHERE cohort_id = 351814
+  UNION DISTINCT
+  SELECT person_id FROM raw_cohort_people WHERE cohort_id = 351814
+)
+AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+```
 
 - **DAU / WAU / MAU**：用 `task_created` 事件按 `person_id` 去重（不是任意事件 DAU）
 - **新用户**：person 的首次 `task_created` 落在该周
 - **留存**：calendar D7（含周末）— 与 PRR business day D7 不同口径，本报系列保持 calendar D7 一致
+- **北极星**：人均周任务数 = 周 task_created / 周末 WAU
 
 ## 3. 必含章节（按顺序）
 
@@ -56,9 +81,9 @@ AND person_id NOT IN (
 
 公式：`周 task_created / 周末 WAU`。给出环比变化。
 
-### 3.4 📊 核心指标对照表
+### 3.4 📊 核心指标对照表（总数据）
 
-W{N} vs W{N-1} 表格，含：
+**口径：CI ∪ non-CI 两个 cohort 合并的全域数据**。W{N} vs W{N-1} 表格，含：
 - WAU（周末值）
 - 工作日 DAU 均
 - 工作日峰 DAU
@@ -77,6 +102,22 @@ W{N} vs W{N-1} 表格，含：
 - people_data_downloaded 用户 + 事件
 - share_link_created / copied 用户
 - candidate_email_copied 用户
+
+### 3.4b 📊 科锐 vs 非科锐 拆分（**2026-06-09 起新增必含**）
+
+3 列对照表（**总 / CI / non-CI**），覆盖以下核心指标，看科锐和非科锐用户行为差异：
+- WAU
+- 周 task_created
+- **人均周任务（各自口径下的北极星）**
+- 新增用户
+- Layer 1 (Sourcing 占比)
+- Layer 2 (Transfer Rate)
+- phone_enrich 用户 + 占自己 cohort WAU 比
+- people_data_downloaded 用户 + 占自己 cohort WAU 比
+
+**拆分要点**：
+- 不只是绝对数对比，**核心是看率（占自己 cohort WAU 比、Layer 1/2）**：科锐和非科锐用户的产品行为模式是否一致
+- AI 洞察里至少有 1 条专门讲科锐 vs 非科锐的差异（如果有显著差异）
 
 ### 3.5 📈 W{N} 逐日 DAU
 
@@ -158,21 +199,27 @@ W{N} cohort 因观察期不足，注明"待 7 day 后回看"；W{N-1} cohort 已
 
 ## 4. 关键 SQL 模板
 
-### 4.1 标准排除子句（{cohort_exclude}）
+### 4.1 标准 WHERE 子句（{cohort_filter}）
 
-**所有事件表查询必加**，包含 3 段：内部 cohort + 离职科锐：
+**所有事件表查询必加**：CI ∪ non-CI 合并 + 排除 Internal Users。
 
 ```sql
-person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (
-  SELECT id FROM persons
-  WHERE properties.org_name = '科锐国际'
-    AND properties.org_employment_status != '在职'
+AND person_id IN (
+  SELECT person_id FROM static_cohort_people WHERE cohort_id IN (317161, 351814)
+  UNION DISTINCT
+  SELECT person_id FROM raw_cohort_people WHERE cohort_id IN (317161, 351814)
 )
+AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
 ```
 
-下面 §4.2-§4.5 模板里的 `{内部排除子句}` 或 `{cohort_exclude}` 一律替换为以上完整 3 段。
+下面 §4.2-§4.5 模板里的 `{cohort_exclude}` / `{内部排除子句}` 一律替换为上述完整 4 行。
+
+### 4.1b 拆分用 WHERE 子句
+
+**仅 CI**：把 `IN (317161, 351814)` 改成 `= 317161`
+**仅 non-CI**：把 `IN (317161, 351814)` 改成 `= 351814`
+两者都保留 Internal Users 排除。
 
 ### 4.2 Daily DAU + tasks
 
@@ -310,13 +357,13 @@ curl -s "$URL" -H 'Content-Type: application/json' -d @/tmp/dingtalk_msg.json
 
 ## 7. 自检清单（每次报告产出前）
 
-- [ ] 头部 cohort 排除人数与当前 cohort version 一致
-- [ ] 所有数字均已排除 cohort 223578
-- [ ] **所有数字均已排除离职科锐**（`org_name='科锐国际' AND org_employment_status != '在职'`）
+- [ ] 头部 cohort 声明：CI 317161 + non-CI 351814，排除 Internal 223578
+- [ ] 所有数字均按"CI ∪ non-CI − Internal"口径取
 - [ ] 北极星指标有环比
+- [ ] §3.4b 科锐 vs 非科锐拆分表存在
 - [ ] Multi-Layer Quality Framework 章节完整（L1 + L2 + 用户级占 WAU 比）
 - [ ] 上周 cohort D7 已完整回看
 - [ ] 留存基线趋势表覆盖至少 4 周
-- [ ] AI 洞察包含 L1/L2 视角
-- [ ] 数据质量备注覆盖所有已知噪音（含"离职科锐已排除"声明）
+- [ ] AI 洞察包含 L1/L2 视角 + 至少 1 条科锐 vs 非科锐差异
+- [ ] 数据质量备注覆盖所有已知噪音
 - [ ] 跨周盯盘表保留 W-1 vs W 对照
