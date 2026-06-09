@@ -14,7 +14,22 @@
 
 - **项目**：PostHog project 332580
 - **内部用户排除**：cohort 223578（当前 39 人；运行时实时查 cohort 当前大小）
-- **排除方式**：`person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578) AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)`
+- **🚨 离职科锐排除**（2026-06-09 起强制）：MDM 把全部 29,114 个科锐员工灌进库，含 26,704 离职 + 3 未入职。**必须排除 `org_name='科锐国际' AND org_employment_status != '在职'`**，否则全域数据被离职员工历史行为污染。
+
+### 标准排除子句（**所有数据查询必加**）
+
+```sql
+person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (
+  SELECT id FROM persons
+  WHERE properties.org_name = '科锐国际'
+    AND properties.org_employment_status != '在职'
+)
+```
+
+⚠️ **关于 person-on-events 模式的注意**：本项目开启了 PoE，事件表上 `person.properties.*` 是事件 ingestion 时刻的值，对 MDM 后期导入的 `org_name/org_employment_status` 全是 NULL。**必须从 persons 表查当前值再排除 person_id**，不能直接在 events 表 WHERE 里写 `person.properties.org_name='科锐国际'`。
+
 - **DAU / WAU / MAU**：用 `task_created` 事件按 `person_id` 去重（不是任意事件 DAU）
 - **新用户**：person 的首次 `task_created` 落在该周
 - **留存**：calendar D7（含周末）— 与 PRR business day D7 不同口径，本报系列保持 calendar D7 一致
@@ -143,12 +158,21 @@ W{N} cohort 因观察期不足，注明"待 7 day 后回看"；W{N-1} cohort 已
 
 ## 4. 关键 SQL 模板
 
-### 4.1 内部排除子句
+### 4.1 标准排除子句（{cohort_exclude}）
+
+**所有事件表查询必加**，包含 3 段：内部 cohort + 离职科锐：
 
 ```sql
 person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
 AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (
+  SELECT id FROM persons
+  WHERE properties.org_name = '科锐国际'
+    AND properties.org_employment_status != '在职'
+)
 ```
+
+下面 §4.2-§4.5 模板里的 `{内部排除子句}` 或 `{cohort_exclude}` 一律替换为以上完整 3 段。
 
 ### 4.2 Daily DAU + tasks
 
@@ -288,10 +312,11 @@ curl -s "$URL" -H 'Content-Type: application/json' -d @/tmp/dingtalk_msg.json
 
 - [ ] 头部 cohort 排除人数与当前 cohort version 一致
 - [ ] 所有数字均已排除 cohort 223578
+- [ ] **所有数字均已排除离职科锐**（`org_name='科锐国际' AND org_employment_status != '在职'`）
 - [ ] 北极星指标有环比
 - [ ] Multi-Layer Quality Framework 章节完整（L1 + L2 + 用户级占 WAU 比）
 - [ ] 上周 cohort D7 已完整回看
 - [ ] 留存基线趋势表覆盖至少 4 周
 - [ ] AI 洞察包含 L1/L2 视角
-- [ ] 数据质量备注覆盖所有已知噪音
+- [ ] 数据质量备注覆盖所有已知噪音（含"离职科锐已排除"声明）
 - [ ] 跨周盯盘表保留 W-1 vs W 对照
