@@ -13,6 +13,7 @@
 ## 2. 数据口径（不可更改）
 
 - **项目**：PostHog project 332580
+- **双域名统一统计**（2026-06-15 起明确）：mira.day 和 mina.run 在同一 PostHog 项目，**埋点同步、报告里不区分**用户来自哪个产品域名
 - **三个核心 cohort**（2026-06-09 起，Selina 在 PostHog UI 维护，自动剔除离职污染）：
   - **CI group**（在职科锐） — cohort id **317161**
   - **non-CI group**（非科锐） — cohort id **351814**
@@ -31,6 +32,59 @@ AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 
 ```
 
 逻辑：**只看 CI ∪ non-CI 两个 cohort 的人**，再排除 Internal Users。离职科锐自动被排除（CI cohort 定义已加在职过滤）。
+
+### 猎头盘子（六月目标口径 — 与"科锐大盘"区分，2026-06-11 起；2026-06-15 加 hitalen.com 邮箱域）
+
+- 周报**大盘** = CI(317161，在职科锐 ≈691) ∪ non-CI(351814)。
+- **六月目标盘子 = 在职猎头 665**：(`persons.org_name='科锐国际' AND org_employment_status='在职' AND org_bu ∈ 猎头集合`) **OR** 邮箱域 `hitalen.com`（在职状态由 cohort 自动过滤）。
+- **猎头集合 org_bu 名单** = CC Healthcare / CC North·East·Central·South·West China / Overseas / INTalent / RPO / RPS / Antal International / Delta / Fin&HR&Legal / 浙江阿尔法
+- **额外补充**：`hitalen.com` 邮箱域用户也算猎头业务（MDM 里未必有 org_bu）
+- ⚠️ **691（CI 邮箱 cohort）≠ 665（org_bu 猎头 + hitalen）**：前者周报大盘用，后者六月目标用。猎头是科锐的子集（去掉 Staffing & SMO / CSC / CSM / 各技术职能组等非一线顾问）。
+- 标准猎头 WHERE（含 hitalen 邮箱域）：
+```sql
+AND person_id IN (
+  SELECT id FROM persons
+  WHERE (
+    properties.org_name='科锐国际' AND properties.org_employment_status='在职'
+    AND properties.org_bu IN ('CC Healthcare','CC North China','CC East China','CC Central China','CC South China','CC West China','Overseas','INTalent','Antal International','Delta','RPO','RPS','Fin&HR&Legal','浙江阿尔法')
+  )
+  OR lower(splitByChar('@', coalesce(properties.email, properties.$email, ''))[-1]) = 'hitalen.com'
+)
+AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+```
+
+### Sourcing 行为定义（2026-06-15 起明确，5 类聚合）
+
+**Sourcing 行为 = 以下 5 类任意一类**，做 Layer 1/2 和"做寻访渗透率"时用聚合 OR 口径：
+
+| # | 行为 | 当前事件映射 | 状态 |
+|---|---|---|---|
+| 1 | mira 调用 sourcing agent | `skill_invoke` where skill_name IN ('talent-mapping','mira-candidate-intake','jd-deep-analysis','overseas-recruitment-platform-analysis') | 🟡 best-effort，待产研明确 |
+| 2 | people search | `people_search_rendered` | ✅ 稳定 |
+| 3 | people data | `people_data_downloaded` | ✅ 稳定 |
+| 4 | mina 调用 CTS MCP | 无明显事件 | ❌ 待产研埋点 |
+| 5 | mira 调插件搜招聘网站（boss直聘/猎聘/脉脉/51job/智联/linkedin/牛客）| 无明显事件 | ❌ 待产研埋点（Browser Extension 侧）|
+
+**Sourcing 行为聚合 SQL**（当前实现，待 4/5 类埋点上线后扩展）：
+
+```sql
+-- 一个用户/任务"做过 sourcing" = 触发过以下任意事件
+WITH sourcing_persons AS (
+  SELECT DISTINCT person_id FROM events
+  WHERE event = 'people_search_rendered'
+     OR event = 'people_data_downloaded'
+     OR (event = 'skill_invoke' AND properties.skill_name IN (
+          'talent-mapping','mira-candidate-intake','jd-deep-analysis','overseas-recruitment-platform-analysis'
+        ))
+  -- 待补：mina CTS MCP 事件、Browser Extension 招聘网站搜索事件
+)
+```
+
+**口径备注**：
+- 数据质量备注必须声明"sourcing 行为定义已扩展但 #4 #5 待埋点"
+- 报告里写出 Layer 1 时附带说明：当前用 3 类事件聚合，全量上线后会重算
+- 如果产研补了埋点，更新本节并在备注里写明"sourcing 定义首次完整"
 
 ### 拆分查询模板（科锐 vs 非科锐）
 
@@ -118,6 +172,21 @@ AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 
 **拆分要点**：
 - 不只是绝对数对比，**核心是看率（占自己 cohort WAU 比、Layer 1/2）**：科锐和非科锐用户的产品行为模式是否一致
 - AI 洞察里至少有 1 条专门讲科锐 vs 非科锐的差异（如果有显著差异）
+
+### 3.4c 🎯 猎头视角（六月目标盘子，2026-06-11 起新增必含）
+
+直接对齐《六月目标拆解_问题定义_20260610.md》的主指标，每周盯 665 在职猎头：
+
+| 指标 | 口径 | W{N} | W{N-1} |
+|---|---|---|---|
+| 新增做寻访猎头数 | 当周**首次** people_search 的猎头数 | | |
+| 活跃猎头数 | 当周 task_created 的猎头数 | | |
+| 做寻访渗透率 | 活跃猎头中做寻访 ÷ 活跃猎头 | | |
+| 猎头 WoW 留存 | 上周活跃猎头本周仍活跃 ÷ 上周活跃 | | |
+| 猎头人均周任务 | 当周 task_created ÷ 当周活跃猎头 | | |
+
+**基线（5 月/W23）**：新增寻访 71（5 月，含 rollout 红利）· 活跃 180 · 做寻访渗透 76% · WoW 57.6% · 人均任务 3.1。
+**口径全部见目标拆解的「指标口径速查表」，与本节一致。**
 
 ### 3.5 📈 W{N} 逐日 DAU
 
@@ -291,6 +360,28 @@ FROM (
 GROUP BY first_day ORDER BY first_day
 ```
 
+### 4.6 猎头视角 SQL（§3.4c 用）
+
+```sql
+-- 猎头 WoW 留存 + 人均周任务（替换 h 的 BU 列表见 §2 猎头集合）
+WITH h AS (SELECT id FROM persons WHERE properties.org_name='科锐国际' AND properties.org_employment_status='在职' AND properties.org_bu IN (...猎头集合...)),
+pa AS (SELECT person_id,
+  max(if(ts>='{上周一}' AND ts<'{上周日+1}',1,0)) AS wprev,
+  max(if(ts>='{本周一}' AND ts<'{本周日+1}',1,0)) AS wcur,
+  countIf(ts>='{本周一}' AND ts<'{本周日+1}') AS tasks
+  FROM (SELECT person_id, toTimeZone(timestamp,'UTC') AS ts FROM events WHERE event='task_created'
+        AND person_id IN (SELECT id FROM h) AND person_id NOT IN (SELECT person_id FROM cohort_people WHERE cohort_id=223578)) GROUP BY person_id)
+SELECT sum(wprev) AS prev_active, sum(wcur) AS cur_active,
+  round(100.0*sum(if(wprev=1 AND wcur=1,1,0))/sum(wprev),1) AS wow_pct,
+  round(sum(tasks)/sum(wcur),2) AS tasks_per_active FROM pa;
+
+-- 新增做寻访猎头数（当周首次 people_search 落在本周）
+WITH h AS (...同上...), fp AS (SELECT person_id, min(toTimeZone(timestamp,'UTC')) AS f FROM events
+  WHERE event='people_search_rendered' AND person_id IN (SELECT id FROM h)
+    AND person_id NOT IN (SELECT person_id FROM cohort_people WHERE cohort_id=223578) GROUP BY person_id)
+SELECT count(DISTINCT person_id) FROM fp WHERE f>='{本周一}' AND f<'{本周日+1}';
+```
+
 ## 5. 写作规范
 
 - **不要 AI 味**：避免"令人欣慰的是"、"值得注意的是"、"综上所述"、过度排比、过度的连接词
@@ -361,6 +452,7 @@ curl -s "$URL" -H 'Content-Type: application/json' -d @/tmp/dingtalk_msg.json
 - [ ] 所有数字均按"CI ∪ non-CI − Internal"口径取
 - [ ] 北极星指标有环比
 - [ ] §3.4b 科锐 vs 非科锐拆分表存在
+- [ ] §3.4c 猎头视角表存在（六月目标主指标，665 猎头口径）
 - [ ] Multi-Layer Quality Framework 章节完整（L1 + L2 + 用户级占 WAU 比）
 - [ ] 上周 cohort D7 已完整回看
 - [ ] 留存基线趋势表覆盖至少 4 周
