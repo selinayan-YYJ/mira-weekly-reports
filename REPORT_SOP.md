@@ -19,19 +19,50 @@
   - **non-CI group**（非科锐） — cohort id **351814**
   - **Internal Users**（Mira + QA 测试，必须排除） — cohort id **223578**
 
-### 标准 WHERE 子句（**所有数据查询必加**）
+### 标准 WHERE 子句（**所有数据查询必加，2026-06-29 修订**）
 
 ```sql
-AND person_id IN (
-  SELECT person_id FROM static_cohort_people WHERE cohort_id IN (317161, 351814)
-  UNION DISTINCT
-  SELECT person_id FROM raw_cohort_people WHERE cohort_id IN (317161, 351814)
+-- 1. 在 CI (在职科锐) 或 non-CI (非科锐) 中
+AND (
+  person_id IN (
+    SELECT id FROM persons
+    WHERE properties.org_name = '科锐国际'
+      AND properties.org_employment_status = '在职'
+      AND lower(coalesce(properties.email, '')) NOT LIKE '%null%'
+      AND lower(coalesce(properties.email, '')) != ''
+  )
+  OR person_id IN (
+    SELECT id FROM persons
+    WHERE properties.org_name != '科锐国际' OR properties.org_name IS NULL
+  )
 )
-AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+-- 2. 排除 Internal Users (cohort 223578)
+AND person_id NOT IN (
+  SELECT person_id FROM raw_cohort_people
+  WHERE cohort_id = 223578
+  GROUP BY person_id HAVING sum(sign) > 0
+)
 ```
 
-逻辑：**只看 CI ∪ non-CI 两个 cohort 的人**，再排除 Internal Users。离职科锐自动被排除（CI cohort 定义已加在职过滤）。
+逻辑：**直接用 cohort definition criteria 去 persons 表过滤**，离职科锐 / 未入职科锐自然不匹配两个 cohort 任何一个 → 被排除。Internal Users 39 人是稳定小 cohort，用 raw_cohort_people 聚合即可（约 53 人，多排几个无害）。
+
+### ⚠️ 不要用的查询方式（2026-06-29 教训）
+
+**禁用**：直接拉 `static_cohort_people` / `raw_cohort_people` 把 cohort_id IN (317161, 351814) 当成员判断。理由：
+- `raw_cohort_people` 是 PostHog 内部**历史评估日志**，不是当前成员表
+- 即便用 `sum(sign) > 0` 聚合，对**动态 cohort + MDM 后期批量改属性**的情况会严重失真
+- 实测：cohort 317161 raw 聚合 = 29,427；实际在职科锐 = 768（38× 虚高）
+- 错过的代价：CI vs non-CI 拆分数字虚高 3 倍（W26 non-CI 实际 21，错算成 67）
+
+**正确**：永远用 cohort definition criteria 直接 join `persons` 表。
+
+### cohort definition 对照（一旦定义改了，本节同步更新）
+
+| cohort | id | system.cohorts count | definition |
+|---|---|---|---|
+| CI Career International Group | 317161 | 768 | `org_name='科锐国际' AND org_employment_status='在职' AND email NOT icontains 'null'` |
+| non-CI Non CI Group Users | 351814 | 343 | `org_name != '科锐国际'`（含 NULL） |
+| Internal Users | 223578 | 39 | `email icontains '@mira.day'` OR `email IN (40 个具体邮箱)` |
 
 ### 猎头盘子（六月目标口径 — 与"科锐大盘"区分，2026-06-11 起；2026-06-15 加 hitalen.com 邮箱域）
 
@@ -86,26 +117,31 @@ WITH sourcing_persons AS (
 - 报告里写出 Layer 1 时附带说明：当前用 3 类事件聚合，全量上线后会重算
 - 如果产研补了埋点，更新本节并在备注里写明"sourcing 定义首次完整"
 
-### 拆分查询模板（科锐 vs 非科锐）
+### 拆分查询模板（科锐 vs 非科锐，2026-06-29 修订）
 
 ```sql
 -- 仅 CI group（在职科锐）
 AND person_id IN (
-  SELECT person_id FROM static_cohort_people WHERE cohort_id = 317161
-  UNION DISTINCT
-  SELECT person_id FROM raw_cohort_people WHERE cohort_id = 317161
+  SELECT id FROM persons
+  WHERE properties.org_name = '科锐国际'
+    AND properties.org_employment_status = '在职'
+    AND lower(coalesce(properties.email, '')) NOT LIKE '%null%'
+    AND lower(coalesce(properties.email, '')) != ''
 )
-AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (
+  SELECT person_id FROM raw_cohort_people
+  WHERE cohort_id = 223578 GROUP BY person_id HAVING sum(sign) > 0
+)
 
 -- 仅 non-CI group（非科锐）
 AND person_id IN (
-  SELECT person_id FROM static_cohort_people WHERE cohort_id = 351814
-  UNION DISTINCT
-  SELECT person_id FROM raw_cohort_people WHERE cohort_id = 351814
+  SELECT id FROM persons
+  WHERE properties.org_name != '科锐国际' OR properties.org_name IS NULL
 )
-AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (
+  SELECT person_id FROM raw_cohort_people
+  WHERE cohort_id = 223578 GROUP BY person_id HAVING sum(sign) > 0
+)
 ```
 
 - **DAU / WAU / MAU**：用 `task_created` 事件按 `person_id` 去重（不是任意事件 DAU）
@@ -268,26 +304,34 @@ W{N} cohort 因观察期不足，注明"待 7 day 后回看"；W{N-1} cohort 已
 
 ## 4. 关键 SQL 模板
 
-### 4.1 标准 WHERE 子句（{cohort_filter}）
+### 4.1 标准 WHERE 子句（{cohort_filter}，2026-06-29 修订）
 
-**所有事件表查询必加**：CI ∪ non-CI 合并 + 排除 Internal Users。
+**所有事件表查询必加**：CI ∪ non-CI 联合 + 排除 Internal Users（用 persons 表 cohort definition，不用 raw_cohort_people 当 cohort 成员表）。
 
 ```sql
-AND person_id IN (
-  SELECT person_id FROM static_cohort_people WHERE cohort_id IN (317161, 351814)
-  UNION DISTINCT
-  SELECT person_id FROM raw_cohort_people WHERE cohort_id IN (317161, 351814)
+AND (
+  person_id IN (
+    SELECT id FROM persons
+    WHERE properties.org_name = '科锐国际'
+      AND properties.org_employment_status = '在职'
+      AND lower(coalesce(properties.email, '')) NOT LIKE '%null%'
+      AND lower(coalesce(properties.email, '')) != ''
+  )
+  OR person_id IN (
+    SELECT id FROM persons
+    WHERE properties.org_name != '科锐国际' OR properties.org_name IS NULL
+  )
 )
-AND person_id NOT IN (SELECT person_id FROM static_cohort_people WHERE cohort_id = 223578)
-AND person_id NOT IN (SELECT person_id FROM raw_cohort_people WHERE cohort_id = 223578)
+AND person_id NOT IN (
+  SELECT person_id FROM raw_cohort_people
+  WHERE cohort_id = 223578 GROUP BY person_id HAVING sum(sign) > 0
+)
 ```
-
-下面 §4.2-§4.5 模板里的 `{cohort_exclude}` / `{内部排除子句}` 一律替换为上述完整 4 行。
 
 ### 4.1b 拆分用 WHERE 子句
 
-**仅 CI**：把 `IN (317161, 351814)` 改成 `= 317161`
-**仅 non-CI**：把 `IN (317161, 351814)` 改成 `= 351814`
+**仅 CI（在职科锐）**：只保留上面的第一个 `person_id IN (SELECT id FROM persons WHERE org_name='科锐国际' AND org_employment_status='在职' ...)`，去掉 OR 后面的 non-CI 部分。
+**仅 non-CI（非科锐）**：只保留 `person_id IN (SELECT id FROM persons WHERE org_name != '科锐国际' OR org_name IS NULL)`。
 两者都保留 Internal Users 排除。
 
 ### 4.2 Daily DAU + tasks
